@@ -719,10 +719,10 @@ const html = `<!DOCTYPE html>
 
         <p>During this period the firewall detected ${esc(infectedCount)} internal IP addresses establishing sessions with ${realDomains.length} flagged domains. These represent completed DNS queries — meaning machines inside the network communicated with infrastructure flagged by threat intelligence. In parallel, ${D.namedThreats && D.namedThreats.length ? D.namedThreats.length + ' distinct threat ' + (D.namedThreats.length === 1 ? 'family was' : 'families were') : 'threat families were'} identified${slr.c2Count ? ' across ' + num(slr.c2Count) + ' total C2 connections' : ''}, and WildFire sandbox confirmed ${slr.malwareKnown != null ? slr.malwareKnown : malwareCount} malware events (which were successfully blocked by the firewall). The tables below identify the specific domains, the endpoints establishing connections, the threat families responsible, and the delivery vectors for confirmed malware.</p>
 
-        <h3>2.1 Which Malicious Domains Are Being Contacted? ${src('Threat Log CSV — spyware subtype, internal zones only; enriched with AlienVault OTX')}</h3>
-        <p style="font-size:10px;color:#666;margin-bottom:6px;">Each domain below was resolved by internal machines during the report period and flagged by Palo Alto Networks threat prevention. The <strong>OTX Verdict</strong> column shows AlienVault Open Threat Exchange intelligence — <strong>MALICIOUS</strong> means independently confirmed across multiple global threat feeds. "Undetected (PAN TID)" means Palo Alto flagged it but OTX has 0 reports — treat as requiring further investigation, not as cleared. The <strong>OTX Pulses</strong> column shows how many independent feeds have reported this domain. The <strong>Intelligence Note</strong> column explains what each domain is designed to do based on its name and pattern.</p>
+        <h3>2.1 Which Malicious Domains Are Being Contacted? ${src('Threat Log CSV — spyware subtype, internal zones only; enriched with AlienVault OTX & Threat Vault')}</h3>
+        <p style="font-size:10px;color:#666;margin-bottom:6px;">Each domain below was resolved by internal machines during the report period and flagged by Palo Alto Networks threat prevention. The <strong>PAN Verdict</strong> column shows the exact Palo Alto Networks Threat Vault signature that triggered the block. The <strong>OTX Intel</strong> column shows AlienVault Open Threat Exchange intelligence pulses — independently confirming the domain across multiple global threat feeds. The <strong>Intelligence Note</strong> column explains what each domain is designed to do based on its name and pattern.</p>
         ${realDomains.length ? renderTable(
-            ['Domain / TID', 'Hits', 'OTX Verdict', 'OTX Pulses', 'Registered', 'Intelligence Note'],
+            ['Domain', 'Total Hits', 'PAN Verdict', 'OTX Intel', 'Registered', 'Why It Matters'],
             realDomains.slice(0, 10).map(d => {
                 const vtVerdict = d.verdict === 'malicious'  ? {text: 'MALICIOUS',   color: C.red}   :
                                   d.verdict === 'suspicious' ? {text: 'SUSPICIOUS',  color: C.amber} :
@@ -746,17 +746,23 @@ const html = `<!DOCTYPE html>
                         ? {text: 'Fake cloud/telecom infrastructure — C2 channel disguised as business application traffic', color: C.amber}
                     : d.otx_pulses >= 25
                         ? {text: `Widely-known attacker infrastructure — reported by ${d.otx_pulses} independent threat intelligence sources`, color: C.amber}
+                    : (d.vault_verdict && d.vault_verdict.toLowerCase() !== 'undetected')
+                        ? {text: `Palo Alto Networks signature triggered: ${d.vault_verdict}`, color: C.amber}
                     : esc(d.note || '');
+                const vaultVerdict = d.vault_verdict || 'Undetected';
+                const vaultFmt = vaultVerdict.toLowerCase() === 'undetected' ? {text: 'Undetected', color: C.mid} :
+                                 vaultVerdict.toLowerCase().includes('spyware') ? {text: vaultVerdict, color: C.red} :
+                                 {text: vaultVerdict, color: C.amber};
                 return [
-                    esc(d.domain) + (d.tid ? ` (TID ${esc(d.tid)})` : ''),
+                    esc(d.domain) + (d.tid ? `<br><span style="font-size:9px;color:${C.mid}">TID ${esc(d.tid)}</span>` : ''),
                     num(d.hits),
-                    vtVerdict,
+                    vaultFmt,
                     pulses,
                     regDate,
                     noteText
                 ];
             }),
-            ['26%','6%','9%','7%','8%','44%']
+            ['22%','6%','13%','9%','8%','42%']
         ) : '<p>No OTX-confirmed malicious domains identified. All detected domains returned 0 OTX pulses — review intempio.com separately as it carries 16,019 PAN TID hits despite no OTX intelligence.</p>'}
 
         ${dnsRows.length ? `
