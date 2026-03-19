@@ -773,7 +773,7 @@ def analyze_spyware(rows, log):
 
     dom_hits_filtered = {d: h for d, h in dom_hits.items()
                          if not is_noise(d) and is_valid_domain(d)}
-    top_doms = sorted(dom_hits_filtered.items(), key=lambda x: -x[1])[:10]
+    top_doms = sorted(dom_hits_filtered.items(), key=lambda x: -x[1])[:40]
     # Always include critical domains even if outside top 10
     critical_patterns = ['okta-ema', 'okta-', '-okta', 'okta.']
     for dom, hits in dom_hits_filtered.items():
