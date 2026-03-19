@@ -33,10 +33,68 @@ def load_config():
         print(f"Warning: could not load config.json: {e}")
     if env_key:
         config['gemini_api_key'] = env_key
-    otx_env = os.environ.get('OTX_API_KEY')
+    otx_env = os.environ.get('DNS_API_KEY') or os.environ.get('OTX_API_KEY')
     if otx_env:
         config['otx_api_key'] = otx_env
+    vault_env = os.environ.get('VAULT_API_KEY')
+    if vault_env:
+        config['vault_api_key'] = vault_env
     return config
+
+# ── THREAT VAULT ENRICHMENT ───────────────────────────────────────────────────
+def enrich_threat_vault(vuln_events, api_key, log):
+    """Enrich vulnerability events with CVEs and descriptions from Palo Alto Networks Threat Vault."""
+    import urllib.request, urllib.error, urllib.parse
+    if not api_key:
+        log('  ⚠ Threat Vault enrichment skipped — no VAULT_API_KEY in environment')
+        return vuln_events
+
+    log(f'  🔍 Threat Vault enrichment: looking up {len(vuln_events)} signatures...')
+    seen_threats = {}
+    for v in vuln_events:
+        # Strip count suffix like "(×134)" for lookup
+        threat_name = re.sub(r'\s*\(\times\d+\)$', '', v.get('threat', '')).strip()
+        threat_name = re.sub(r'\s*\(\×\d+\)$', '', threat_name).strip()
+        if not threat_name:
+            continue
+            
+        if threat_name in seen_threats:
+            v['cve'] = seen_threats[threat_name].get('cve')
+            v['desc'] = seen_threats[threat_name].get('desc')
+            continue
+
+        try:
+            url = f'https://api.threatvault.paloaltonetworks.com/service/v1/threats?name={urllib.parse.quote(threat_name)}'
+            req = urllib.request.Request(url, headers={'X-API-KEY': api_key})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                payload = json.loads(resp.read())
+                
+            cve, desc = None, None
+            if payload.get('success') and payload.get('count', 0) > 0:
+                # Check vulnerability then spyware then virus
+                data = payload.get('data', {})
+                items = data.get('vulnerability') or data.get('spyware') or data.get('virus') or []
+                if items:
+                    cve = items[0].get('cve', '')
+                    if isinstance(cve, list): cve = cve[0] if cve else ''
+                    desc = items[0].get('description', '')
+                    if isinstance(desc, list): desc = desc[0] if desc else ''
+                    # Cleanup desc for LLM (take first sentence/chunk)
+                    desc = re.sub(r'\s+', ' ', desc).strip()
+                    if len(desc) > 250:
+                        desc = desc[:247] + '...'
+                    
+                    v['cve'] = cve
+                    v['desc'] = desc
+                    seen_threats[threat_name] = {'cve': cve, 'desc': desc}
+                    log(f'    VAULT {threat_name[:40]}: Found {"CVE " + cve if cve else "description"}')
+                else:
+                    log(f'    VAULT {threat_name[:40]}: No signature details found')
+        except Exception as e:
+            log(f'    VAULT {threat_name[:40]}: lookup error ({str(e)[:50]})')
+            
+    log('  ✔ Threat Vault enrichment complete')
+    return vuln_events
 
 # ── OTX ENRICHMENT ────────────────────────────────────────────────────────────
 def enrich_otx(domains, api_key, log):
@@ -251,7 +309,7 @@ Real data:
 - {f"CRITICAL: 38,508 unauthorized HTTP brute force attempts against GitHub from inside the network" if any("github" in a.get('app','') for a in data.get('appVulns',[])) else ""}
 - {f"SSH brute force: {ssh['user']} from {ssh['src_ip']} - {ssh['threat']}" if ssh else ""}
 - Named users in vuln events: {', '.join(set(v['user'] for v in data.get('vulnEvents',[]) if v.get('user') and v['user'] not in ('','—','unknown'))) or 'none'}
-- All vuln events: {'; '.join(f"{v['user']} {v['threat']} ({v['severity']})" for v in data.get('vulnEvents',[])[:5]) or 'none'}
+- All vuln events: {'; '.join(f"{v.get('user','—')} {v.get('threat','')} ({v.get('severity','')}) [CVE: {v.get('cve','N/A')} - {v.get('desc','')}]" for v in data.get('vulnEvents',[])[:5]) or 'none'}
 - Vulnerability exploits (SLR): {vuln_exploits}""",
 
         'lateral': f"""{base}
@@ -1865,26 +1923,8 @@ def generate(source_dir, customer_name, output_dir, log):
         key=lambda x: (SEVERITY_ORDER.get(x['severity'].lower(), 5), -x['count'])
     )
     
-    # If we have no users, try finding ANY users in the entire vuln dataset to show it's working
-    has_any_users = any(v['user'] and v['user'] != '—' for v in vu_deduped)
-    if not has_any_users:
-        # Fall back to pulling ANY low/informational events with users just to populate the "Named Users" section
-        _vu_all_users = [r for r in vu if r[1].strip() and r[1] != '—']
-        for r in _vu_all_users:
-            _key = (r[0], r[1], re.sub(r'\(\d+\)$', '', r[3]).strip(), r[4], r[5])
-            if _key not in _vu_deduped:
-                _vu_deduped[_key] = {'row': r, 'count': 0}
-            _vu_deduped[_key]['count'] += 1
-            
-        vu_deduped = sorted(
-            [{'src_ip': v['row'][0], 'user': v['row'][1], 'zone': v['row'][2],
-              'threat': re.sub(r'\(\d+\)$', '', v['row'][3]).strip() +
-                        (f' (×{v["count"]})' if v['count'] > 1 else ''),
-              'count': v['count'],
-              'severity': v['row'][4], 'action': v['row'][5], 'dst_ip': v['row'][6]}
-             for v in _vu_deduped.values()],
-            key=lambda x: (SEVERITY_ORDER.get(x['severity'].lower(), 5), -x['count'])
-        )
+    # (User specifically requested to remove the fallback logic that pulls Informational/Low users)
+    
     log(f'    Vuln events after dedup: {len(vu_deduped)} unique rows (was {len(vu_filtered)})')
 
     data = {
@@ -1926,8 +1966,14 @@ def generate(source_dir, customer_name, output_dir, log):
     }
 
     # ── OTX enrichment — adds verdict/otx_pulses/registered to each domain ──
-    otx_key = config.get('otx_api_key') or os.environ.get('OTX_API_KEY')
+    otx_key = config.get('otx_api_key') or os.environ.get('OTX_API_KEY') or os.environ.get('DNS_API_KEY')
     data['topDomains'] = enrich_otx(data['topDomains'], otx_key, log)
+
+    # ── Threat Vault enrichment — adds CVE and descriptions ──
+    vault_key = config.get('vault_api_key') or os.environ.get('VAULT_API_KEY')
+    if vault_key and data.get('vulnEvents'):
+        # Enrich the top 5 deduped events only to save time
+        data['vulnEvents'][:5] = enrich_threat_vault(data['vulnEvents'][:5], vault_key, log)
 
     # Filter out undetected noise domains so they don't pollute LLM summary or top KPIs
     cn_key = customer_name.lower().replace(' ','').replace('corp','').replace('inc','').replace('llc','').replace('ltd','')

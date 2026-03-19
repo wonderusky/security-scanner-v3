@@ -1031,7 +1031,7 @@ const html = `<!DOCTYPE html>
                         tableEvents.map(v => [
                             esc(v.src_ip),
                             v.user && v.user.trim() && v.user !== '—' ? {text: esc(v.user), color: C.dark} : {text: '(no user)', color: C.mid},
-                            esc(v.threat),
+                            esc(v.threat) + (v.cve ? `<br><span style="color:${C.mid};font-size:9px;">${esc(v.cve)}</span>` : ''),
                             {text: (v.severity||'').toUpperCase(), color: (v.severity||'').toLowerCase() === 'critical' ? C.red : (v.severity||'').toLowerCase() === 'high' ? C.amber : ''},
                             {text: esc(v.action||'—'), color: v.action === 'alert' ? C.red : ''},
                             esc(v.dst_ip||'—')
