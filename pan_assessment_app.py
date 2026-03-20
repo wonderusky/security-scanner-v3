@@ -152,10 +152,15 @@ def enrich_domains(domains, otx_key, vault_key, log):
                         log(f'    VAULT {domain}: {d["vault_verdict"]}')
                     else:
                         d['vault_verdict'] = 'Undetected'
+                        log(f'    VAULT {domain}: Undetected')
                 else:
                     d['vault_verdict'] = 'Undetected'
+                    log(f'    VAULT {domain}: Undetected')
             except Exception as e:
-                log(f'    VAULT error for {domain}: {str(e)[:50]}')
+                if hasattr(e, 'code') and e.code == 404:
+                    d['vault_verdict'] = 'Undetected'
+                else:
+                    log(f'    VAULT error for {domain}: {str(e)[:50]}')
                 
     log('  ✔ Domain enrichment complete')
     return domains
@@ -194,8 +199,42 @@ def save_assessment(customer_name, data, out_path):
     finally:
         conn.close()
 
+def call_airs_sideband(prompt, token, agent_id, profile, log):
+    """Sends prompt to Prisma AIRS sideband API for validation before LLM."""
+    url = "https://service.api.aisecurity.paloaltonetworks.com/v1/scan/sync/request"
+    payload = {
+        "contents": [{"prompt": prompt}],
+        "ai_profile": {"profile_name": profile}
+    }
+    headers = {
+        'x-pan-token': token,
+        'X-PAN-AGENT-ID': agent_id,
+        'Content-Type': 'application/json'
+    }
+    try:
+        req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers=headers)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read())
+            if result.get("action") == "block":
+                log(f'  ⚠️ PRISMA AIRS BLOCKED PROMPT: {result.get("prompt_detected")}')
+                return False
+            return True
+    except Exception as e:
+        log(f'  ⚠️ Prisma AIRS connection failed ({e}), failing open to prevent workflow break')
+        return True
+
 # ── GEMINI LLM SO WHAT ANALYSIS ───────────────────────────────────────────────
 def call_gemini(prompt, api_key, model, log):
+    # Retrieve AIRS credentials from environment to enforce logging
+    airs_token = os.environ.get('PRISMA_AIRS_TOKEN', 'DzKcV5DAimXgUd9giAuSVfwml87G4UjfjdlaVLYQc0m14MC3')
+    airs_uuid  = os.environ.get('PRISMA_AIRS_UUID', 'ba802281-718d-4874-893b-09fc3c84673b')
+    airs_prof  = os.environ.get('PRISMA_AIRS_PROFILE', 'OpenClaw-Security-Profile')
+    
+    if airs_token:
+        # Pre-flight the prompt through Prisma AIRS
+        if not call_airs_sideband(prompt, airs_token, airs_uuid, airs_prof, log):
+            return ["Prisma AIRS blocked this analysis due to sensitive data exposure policy."]
+
     model_id = model.replace('models/', '')
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent?key={api_key}"
     payload = {
